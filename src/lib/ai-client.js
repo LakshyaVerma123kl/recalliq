@@ -1,6 +1,5 @@
 import Groq from "groq-sdk";
 import { GoogleGenAI } from "@google/genai";
-import OpenAI from "openai";
 
 const FLASHCARD_SYSTEM_PROMPT = `You are an expert educator and flashcard creator. Your job is to analyze educational content and generate high-quality flashcards that maximize learning and retention.
 
@@ -39,66 +38,56 @@ Generate 15-30 comprehensive, high-quality flashcards. Quality over quantity.`;
 
 const REGENERATE_SYSTEM_PROMPT = `You are an expert educator. Given a flashcard question, generate a better, more detailed answer. Keep it concise but thorough. Respond with ONLY the improved answer text, nothing else.`;
 
-/**
- * Multi-provider AI client with fallback chain:
- * 1. Groq (Llama 3.3 70B) — Primary, fastest
- * 2. Gemini 2.5 Flash — Secondary
- * 3. Gemini 2.5 Pro — For complex content
- * 4. OpenAI — Final fallback (if key provided)
- */
-
 async function callGroq(textContent, customPrompt) {
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
   const response = await groq.chat.completions.create({
     model: "llama-3.3-70b-versatile",
     messages: [
       { role: "system", content: FLASHCARD_SYSTEM_PROMPT },
       {
         role: "user",
-        content: customPrompt
-          ? customPrompt
-          : `Analyze the following educational content and generate comprehensive flashcards:\n\n${textContent}`,
+        content: customPrompt ? customPrompt : `Analyze the following educational content and generate comprehensive flashcards:\n\n${textContent}`,
       },
     ],
     temperature: 0.7,
     max_tokens: 8000,
     response_format: { type: "json_object" },
   });
-
   return response.choices[0].message.content;
 }
 
-async function callOpenAI(textContent, customPrompt) {
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-  const response = await openai.chat.completions.create({
-    model: "gpt-4o",
-    messages: [
-      { role: "system", content: FLASHCARD_SYSTEM_PROMPT },
-      {
-        role: "user",
-        content: customPrompt
-          ? customPrompt
-          : `Analyze the following educational content and generate comprehensive flashcards:\n\n${textContent}`,
-      },
-    ],
-    temperature: 0.7,
-    response_format: { type: "json_object" },
+async function callHuggingFace(textContent, customPrompt) {
+  const response = await fetch("https://api-inference.huggingface.co/models/meta-llama/Llama-3.3-70B-Instruct/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "meta-llama/Llama-3.3-70B-Instruct",
+      messages: [
+        { role: "system", content: FLASHCARD_SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: customPrompt ? customPrompt : `Analyze the following educational content and generate comprehensive flashcards:\n\n${textContent}`,
+        }
+      ],
+      max_tokens: 8000,
+      temperature: 0.7,
+      response_format: { type: "json_object" }
+    })
   });
-
-  return response.choices[0].message.content;
+  const data = await response.json();
+  if(!response.ok) throw new Error(data.error?.message || "HuggingFace API failed");
+  return data.choices[0].message.content;
 }
 
-async function callGeminiWithPDF(fileBuffer, fileName, model = "gemini-2.5-flash-preview-04-17") {
+async function callGeminiWithPDF(fileBuffer, fileName, model) {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
-  // Upload file to Gemini
   const uploadedFile = await ai.files.upload({
     file: new Blob([fileBuffer], { type: "application/pdf" }),
     config: { displayName: fileName },
   });
-
   const response = await ai.models.generateContent({
     model: model,
     contents: [
@@ -106,42 +95,29 @@ async function callGeminiWithPDF(fileBuffer, fileName, model = "gemini-2.5-flash
         role: "user",
         parts: [
           { fileData: { fileUri: uploadedFile.uri, mimeType: "application/pdf" } },
-          {
-            text: `${FLASHCARD_SYSTEM_PROMPT}\n\nAnalyze this PDF document thoroughly and generate comprehensive flashcards covering all key material. Return ONLY valid JSON.`,
-          },
+          { text: `${FLASHCARD_SYSTEM_PROMPT}\n\nAnalyze this PDF document thoroughly and generate comprehensive flashcards covering all key material. Return ONLY valid JSON.` },
         ],
       },
     ],
-    config: {
-      temperature: 0.7,
-      maxOutputTokens: 8192,
-    },
+    config: { temperature: 0.7, maxOutputTokens: 8192 },
   });
-
   return response.text;
 }
 
-async function callGeminiWithText(textContent, model = "gemini-2.5-flash-preview-04-17") {
+async function callGeminiWithText(textContent, model) {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
   const response = await ai.models.generateContent({
     model: model,
     contents: [
       {
         role: "user",
         parts: [
-          {
-            text: `${FLASHCARD_SYSTEM_PROMPT}\n\nAnalyze the following educational content and generate comprehensive flashcards:\n\n${textContent}`,
-          },
+          { text: `${FLASHCARD_SYSTEM_PROMPT}\n\nAnalyze the following educational content and generate comprehensive flashcards:\n\n${textContent}` },
         ],
       },
     ],
-    config: {
-      temperature: 0.7,
-      maxOutputTokens: 8192,
-    },
+    config: { temperature: 0.7, maxOutputTokens: 8192 },
   });
-
   return response.text;
 }
 
@@ -156,92 +132,78 @@ function cleanJsonResponse(text) {
   }
 }
 
-/**
- * Generate flashcards from PDF buffer
- * Strategy: Use Gemini for PDF (native vision), then Groq for text fallback
- */
 export async function generateFromPDF(fileBuffer, fileName) {
   const errors = [];
-
-  // Strategy 1: Gemini 2.5 Flash with native PDF
   if (process.env.GEMINI_API_KEY) {
     try {
-      const raw = await callGeminiWithPDF(fileBuffer, fileName, "gemini-2.5-flash-preview-04-17");
+      const raw = await callGeminiWithPDF(fileBuffer, fileName, "gemini-2.5-flash");
       const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (parsed.cards && parsed.cards.length > 0) {
-        return { ...parsed, provider: "gemini-flash" };
-      }
+      if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "gemini" };
     } catch (err) {
-      errors.push(`Gemini Flash: ${err.message}`);
+      errors.push(`Gemini 2.5 Flash: ${err.message}`);
     }
-
-    // Strategy 2: Gemini 2.5 Pro for complex content
+    
     try {
-      const raw = await callGeminiWithPDF(fileBuffer, fileName, "gemini-2.5-pro-preview-03-25");
+      const raw = await callGeminiWithPDF(fileBuffer, fileName, "gemini-pro");
       const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (parsed.cards && parsed.cards.length > 0) {
-        return { ...parsed, provider: "gemini-pro" };
-      }
+      if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "gemini" };
+    } catch (err) {
+      errors.push(`Gemini Pro: ${err.message}`);
+    }
+  }
+  throw new Error(`All AI providers failed for PDF. Errors: ${errors.join("; ")}`);
+}
+
+export async function generateFromText(textContent) {
+  const errors = [];
+
+  // 1. Groq (Llama 3.3 70B)
+  if (process.env.GROQ_API_KEY) {
+    try {
+      const raw = await callGroq(textContent);
+      const parsed = JSON.parse(cleanJsonResponse(raw));
+      if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "groq" };
+    } catch (err) {
+      errors.push(`Groq Llama 3.3 70B: ${err.message}`);
+    }
+  }
+
+  // 2. Gemini 2.5 Flash
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const raw = await callGeminiWithText(textContent, "gemini-2.5-flash");
+      const parsed = JSON.parse(cleanJsonResponse(raw));
+      if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "gemini" };
+    } catch (err) {
+      errors.push(`Gemini 2.5 Flash: ${err.message}`);
+    }
+  }
+
+  // 3. Gemini Pro
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const raw = await callGeminiWithText(textContent, "gemini-pro");
+      const parsed = JSON.parse(cleanJsonResponse(raw));
+      if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "gemini" };
     } catch (err) {
       errors.push(`Gemini Pro: ${err.message}`);
     }
   }
 
-  throw new Error(`All AI providers failed for PDF. Errors: ${errors.join("; ")}`);
-}
-
-/**
- * Generate flashcards from text content
- * Strategy: Groq (primary) → Gemini Flash → Gemini Pro
- */
-export async function generateFromText(textContent) {
-  const errors = [];
-
-  // Strategy 1: Groq (Llama 3.3 70B) — Primary, fastest
-  if (process.env.GROQ_API_KEY) {
+  // 4. HuggingFace Llama 3.3
+  if (process.env.HUGGINGFACE_API_KEY) {
     try {
-      const raw = await callGroq(textContent);
+      const raw = await callHuggingFace(textContent);
       const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (parsed.cards && parsed.cards.length > 0) {
-        return { ...parsed, provider: "groq" };
-      }
+      if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "huggingface" };
     } catch (err) {
-      errors.push(`Groq: ${err.message}`);
-    }
-  }
-
-  // Strategy 2: Gemini 2.5 Flash
-  if (process.env.GEMINI_API_KEY) {
-    try {
-      const raw = await callGeminiWithText(textContent, "gemini-2.5-flash-preview-04-17");
-      const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (parsed.cards && parsed.cards.length > 0) {
-        return { ...parsed, provider: "gemini-flash" };
-      }
-    } catch (err) {
-      errors.push(`Gemini Flash: ${err.message}`);
-    }
-  }
-
-  // Strategy 3: OpenAI (GPT-4o)
-  if (process.env.OPENAI_API_KEY) {
-    try {
-      const raw = await callOpenAI(textContent);
-      const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (parsed.cards && parsed.cards.length > 0) {
-        return { ...parsed, provider: "openai" };
-      }
-    } catch (err) {
-      errors.push(`OpenAI: ${err.message}`);
+      errors.push(`HuggingFace Llama 3.3: ${err.message}`);
     }
   }
 
   throw new Error(`All AI providers failed. Errors: ${errors.join("; ")}`);
 }
 
-/**
- * Regenerate answer for a single card
- */
 export async function regenerateAnswer(question, currentAnswer) {
   const prompt = `Current question: "${question}"\nCurrent answer: "${currentAnswer}"\n\nGenerate a better, more detailed answer. Respond with ONLY the improved answer text.`;
 
@@ -250,47 +212,38 @@ export async function regenerateAnswer(question, currentAnswer) {
       const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
       const response = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
-        messages: [
-          { role: "system", content: REGENERATE_SYSTEM_PROMPT },
-          { role: "user", content: prompt },
-        ],
-        temperature: 0.7,
-        max_tokens: 1000,
+        messages: [{ role: "system", content: REGENERATE_SYSTEM_PROMPT }, { role: "user", content: prompt }],
+        temperature: 0.7, max_tokens: 1000,
       });
       return response.choices[0].message.content;
-    } catch (err) {
-      // Fail silently and let the next block handle it
-    }
+    } catch (err) {}
   }
 
   if (process.env.GEMINI_API_KEY) {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash-preview-04-17",
+        model: "gemini-2.5-flash",
         contents: [{ role: "user", parts: [{ text: `${REGENERATE_SYSTEM_PROMPT}\n\n${prompt}` }] }],
       });
       return response.text;
-    } catch (err) {
-      // Fail silently and let the next block handle it
-    }
+    } catch (err) {}
   }
 
-  if (process.env.OPENAI_API_KEY) {
+  if (process.env.HUGGINGFACE_API_KEY) {
     try {
-      const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: REGENERATE_SYSTEM_PROMPT },
-          { role: "user", content: prompt },
-        ],
-        temperature: 0.7,
+      const response = await fetch("https://api-inference.huggingface.co/models/meta-llama/Llama-3.3-70B-Instruct/v1/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${process.env.HUGGINGFACE_API_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "meta-llama/Llama-3.3-70B-Instruct",
+          messages: [{ role: "system", content: REGENERATE_SYSTEM_PROMPT }, { role: "user", content: prompt }],
+          temperature: 0.7
+        })
       });
-      return response.choices[0].message.content;
-    } catch (err) {
-      // Fail silently
-    }
+      const data = await response.json();
+      return data.choices[0].message.content;
+    } catch (err) {}
   }
 
   throw new Error("No AI provider available for regeneration");
