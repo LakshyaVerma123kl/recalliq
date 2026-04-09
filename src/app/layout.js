@@ -18,6 +18,13 @@ export const metadata = {
   description:
     "Turn any PDF or notes into smart flashcards with AI. Study with spaced repetition, track your mastery, and retain knowledge long-term.",
   keywords: ["flashcards", "spaced repetition", "AI", "study", "learning", "SM-2", "PDF"],
+  icons: {
+    icon: [
+      { url: "/favicon.svg", type: "image/svg+xml" },
+    ],
+    apple: "/logo-icon.svg",
+    shortcut: "/favicon.svg",
+  },
   openGraph: {
     title: "RecallIQ — AI-Powered Smart Flashcards",
     description: "Turn any PDF into smart flashcards. Study smarter with spaced repetition.",

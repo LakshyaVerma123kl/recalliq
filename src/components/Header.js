@@ -23,23 +23,39 @@ export default function Header() {
       <div style={{ maxWidth: 1100, margin: "0 auto", padding: "0 24px", height: 56, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         {/* Logo */}
         <Link href="/" style={{ display: "flex", alignItems: "center", gap: 10, textDecoration: "none", color: "inherit" }}>
-          <div
-            style={{
-              width: 32,
-              height: 32,
-              borderRadius: 10,
-              background: "linear-gradient(135deg, #7c6aef, #9b7df7)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              color: "white",
-              fontWeight: 800,
-              fontSize: 15,
-              letterSpacing: "-0.03em",
-            }}
+          {/* RecallIQ SVG Logo Icon */}
+          <svg
+            width="34"
+            height="34"
+            viewBox="0 0 32 32"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+            style={{ flexShrink: 0 }}
           >
-            R
-          </div>
+            <defs>
+              <linearGradient id="hBg" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stopColor="#1a1035"/>
+                <stop offset="100%" stopColor="#0d0820"/>
+              </linearGradient>
+              <linearGradient id="hIg" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stopColor="#7c6aef"/>
+                <stop offset="100%" stopColor="#c084fc"/>
+              </linearGradient>
+            </defs>
+            <rect width="32" height="32" rx="8" fill="url(#hBg)"/>
+            {/* Card outline */}
+            <rect x="4.5" y="9" width="23" height="15" rx="3" fill="none" stroke="url(#hIg)" strokeWidth="1.6"/>
+            {/* Subtle inner card lines */}
+            <rect x="8" y="13.5" width="9" height="1.8" rx="0.9" fill="#9b7df7" opacity="0.4"/>
+            <rect x="8" y="17" width="6.5" height="1.5" rx="0.75" fill="#9b7df7" opacity="0.25"/>
+            {/* Lightning bolt */}
+            <path
+              d="M 19 7.5 L 16.2 16 L 18.4 16 L 15.5 24.5 L 23.5 14.5 L 21 14.5 L 24.2 7.5 Z"
+              fill="url(#hIg)"
+              opacity="0.97"
+            />
+          </svg>
+          {/* Wordmark */}
           <span style={{ fontSize: 16, fontWeight: 700, letterSpacing: "-0.02em", color: "var(--text-primary)" }}>
             recall<span style={{ color: "var(--accent)" }}>iq</span>
           </span>

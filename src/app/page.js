@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { v4 as uuidv4 } from "uuid";
-import { getAllDecks, saveDeck, deleteDeck } from "@/lib/storage";
+import { getAllDecks, saveDeck, deleteDeck, getDeckStats } from "@/lib/storage";
 import { useToast } from "@/components/Toast";
 import FileUpload from "@/components/FileUpload";
 import DeckCard from "@/components/DeckCard";
@@ -13,6 +13,7 @@ export default function DashboardPage() {
   const toast = useToast();
   const [decks, setDecks] = useState([]);
   const [search, setSearch] = useState("");
+  const [sortBy, setSortBy] = useState("recent");
   const [showUpload, setShowUpload] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -85,12 +86,20 @@ export default function DashboardPage() {
     [toast]
   );
 
-  const filteredDecks = decks.filter(
+  const decksWithStats = decks.map(d => ({ ...d, stats: getDeckStats(d) }));
+
+  const filteredDecks = decksWithStats.filter(
     (d) =>
       d.title.toLowerCase().includes(search.toLowerCase()) ||
       (d.subject || "").toLowerCase().includes(search.toLowerCase()) ||
       (d.description || "").toLowerCase().includes(search.toLowerCase())
-  );
+  ).sort((a, b) => {
+    if (sortBy === "title") return a.title.localeCompare(b.title);
+    return new Date(b.createdAt) - new Date(a.createdAt);
+  });
+
+  const dueDecks = filteredDecks.filter((d) => d.stats.dueToday > 0);
+  const otherDecks = filteredDecks.filter((d) => d.stats.dueToday === 0);
 
   if (!mounted) return null;
 
@@ -197,8 +206,8 @@ export default function DashboardPage() {
           </p>
         </div>
         
-        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          <div style={{ position: "relative", width: 260 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", justifyContent: "flex-end", flex: 1 }}>
+          <div style={{ position: "relative", width: 240, maxWidth: "100%" }}>
             <svg style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
@@ -206,7 +215,7 @@ export default function DashboardPage() {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search by topic or title..."
+              placeholder="Search decks..."
               style={{
                 width: "100%", background: "var(--surface)", border: "1px solid var(--border)",
                 borderRadius: "100px", padding: "10px 16px 10px 40px", fontSize: 14,
@@ -217,33 +226,97 @@ export default function DashboardPage() {
               onBlur={(e) => (e.target.style.borderColor = "var(--border)")}
             />
           </div>
-          <button onClick={() => setShowUpload(!showUpload)} className="btn-primary" style={{ borderRadius: 100, padding: "10px 24px" }}>
+          <select 
+            value={sortBy} 
+            onChange={e => setSortBy(e.target.value)}
+            style={{
+              padding: "10px 14px",
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: "100px",
+              color: "var(--text-primary)",
+              outline: "none",
+              fontSize: 14,
+              cursor: "pointer",
+              appearance: "none",
+              boxShadow: "inset 0 2px 4px rgba(0,0,0,0.1)"
+            }}
+          >
+            <option value="recent">Recently Added</option>
+            <option value="title">Alphabetical</option>
+          </select>
+          <button onClick={() => setShowUpload(!showUpload)} className={showUpload ? "btn-secondary" : "btn-primary"} style={{ borderRadius: 100, padding: "10px 24px" }}>
             {showUpload ? "Cancel" : "New Deck"}
           </button>
         </div>
       </div>
 
-      {/* Upload panel */}
+      {/* Upload panel & Generation Skeleton */}
       {showUpload && (
         <div className="scale-in" style={{ marginBottom: 48, maxWidth: 720, margin: "0 auto 48px auto" }}>
-          <FileUpload onGenerate={handleGenerate} isGenerating={isGenerating} />
+          {isGenerating ? (
+            <div className="glass" style={{ padding: "64px 32px", textAlign: "center", borderRadius: "var(--radius-lg)" }}>
+               <div style={{ position: "relative", width: 64, height: 64, margin: "0 auto 24px", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                 <div style={{ position: "absolute", inset: 0, border: "4px solid var(--accent)", borderTopColor: "transparent", borderRadius: "50%", opacity: 0.8 }} className="animate-spin" />
+                 <svg style={{ color: "var(--accent)" }} width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg>
+               </div>
+               <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 8, color: "var(--text-primary)" }}>Synthesizing Knowledge...</h2>
+               <p style={{ color: "var(--text-secondary)", marginBottom: 32, maxWidth: 400, margin: "0 auto 32px" }}>
+                 Our AI is reading your content, extracting key concepts, and calculating optimal spaced-repetition parameters.
+               </p>
+               
+               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, opacity: 0.5 }}>
+                 {[1, 2, 3, 4].map(i => (
+                   <div key={i} style={{ height: 80, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, animation: `pulse 1.5s ease-in-out ${i * 0.2}s infinite` }} />
+                 ))}
+               </div>
+            </div>
+          ) : (
+            <FileUpload onGenerate={handleGenerate} isGenerating={false} />
+          )}
         </div>
       )}
 
-      {/* Deck grid */}
+      {/* Decks Layout */}
       {filteredDecks.length > 0 ? (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 24 }}>
-          {filteredDecks.map((deck, i) => (
-            <DeckCard key={deck.id} index={i} deck={deck} onDelete={handleDelete} />
-          ))}
+        <div style={{ display: "flex", flexDirection: "column", gap: 48 }}>
+          
+          {dueDecks.length > 0 && (
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 20 }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", background: "var(--danger)", boxShadow: "0 0 10px var(--danger)" }} />
+                <h2 style={{ fontSize: 18, fontWeight: 700 }}>Continue Studying</h2>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 24 }}>
+                {dueDecks.map((deck, i) => (
+                  <DeckCard key={deck.id} index={i} deck={deck} onDelete={handleDelete} />
+                ))}
+              </div>
+            </div>
+          )}
+
+          {otherDecks.length > 0 && (
+            <div>
+              {dueDecks.length > 0 && (
+                <h2 style={{ fontSize: 18, fontWeight: 700, marginBottom: 20, color: "var(--text-secondary)" }}>
+                  All Collections
+                </h2>
+              )}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: 24 }}>
+                {otherDecks.map((deck, i) => (
+                  <DeckCard key={deck.id} index={i} deck={deck} onDelete={handleDelete} />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       ) : (
-        <div style={{ textAlign: "center", padding: "64px 0" }}>
-          <div style={{ width: 48, height: 48, borderRadius: "50%", background: "var(--surface)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px", color: "var(--text-muted)" }}>
+        <div style={{ textAlign: "center", padding: "64px 0", background: "var(--surface)", borderRadius: "var(--radius-lg)", border: "1px dashed var(--border)" }}>
+          <div style={{ width: 48, height: 48, borderRadius: "50%", background: "var(--surface-hover)", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 16px", color: "var(--text-muted)" }}>
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           </div>
           <p style={{ fontSize: 15, color: "var(--text-muted)", fontWeight: 500 }}>
-            No decks matched your search.
+            {search ? "No decks matched your search." : "No collections found."}
           </p>
         </div>
       )}

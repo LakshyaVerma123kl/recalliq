@@ -211,7 +211,6 @@ export default function DeckDetailPage({ params }) {
               <span style={{ fontSize: 11, padding: "4px 10px", borderRadius: 8, background: "rgba(108,99,255,0.12)", color: "rgba(108,99,255,0.8)", fontWeight: 600 }}>
                 {deck.subject || "General"}
               </span>
-              
             </div>
             <h1 style={{ fontSize: "clamp(22px,3vw,30px)", fontWeight: 800, color: "rgba(255,255,255,0.95)", marginBottom: 8, lineHeight: 1.2 }}>
               {deck.title}
