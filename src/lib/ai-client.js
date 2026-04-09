@@ -146,17 +146,14 @@ async function callGeminiWithText(textContent, model = "gemini-2.5-flash-preview
 }
 
 function cleanJsonResponse(text) {
-  // Remove markdown code blocks if present
-  let cleaned = text.trim();
-  if (cleaned.startsWith("```json")) {
-    cleaned = cleaned.slice(7);
-  } else if (cleaned.startsWith("```")) {
-    cleaned = cleaned.slice(3);
+  try {
+    JSON.parse(text);
+    return text.trim();
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/);
+    if (match) return match[0];
+    return text.trim();
   }
-  if (cleaned.endsWith("```")) {
-    cleaned = cleaned.slice(0, -3);
-  }
-  return cleaned.trim();
 }
 
 /**
@@ -169,29 +166,19 @@ export async function generateFromPDF(fileBuffer, fileName) {
   // Strategy 1: Gemini 2.5 Flash with native PDF
   if (process.env.GEMINI_API_KEY) {
     try {
-      console.log("[AI] Trying Gemini 2.5 Flash with PDF...");
-      const result = await callGeminiWithPDF(fileBuffer, fileName, "gemini-2.5-flash-preview-04-17");
-      const parsed = JSON.parse(cleanJsonResponse(result));
       if (parsed.cards && parsed.cards.length > 0) {
-        console.log(`[AI] Gemini Flash generated ${parsed.cards.length} cards`);
         return { ...parsed, provider: "gemini-flash" };
       }
     } catch (err) {
-      console.error("[AI] Gemini Flash PDF failed:", err.message);
       errors.push(`Gemini Flash: ${err.message}`);
     }
 
     // Strategy 2: Gemini 2.5 Pro for complex content
     try {
-      console.log("[AI] Trying Gemini 2.5 Pro with PDF...");
-      const result = await callGeminiWithPDF(fileBuffer, fileName, "gemini-2.5-pro-preview-05-06");
-      const parsed = JSON.parse(cleanJsonResponse(result));
       if (parsed.cards && parsed.cards.length > 0) {
-        console.log(`[AI] Gemini Pro generated ${parsed.cards.length} cards`);
         return { ...parsed, provider: "gemini-pro" };
       }
     } catch (err) {
-      console.error("[AI] Gemini Pro PDF failed:", err.message);
       errors.push(`Gemini Pro: ${err.message}`);
     }
   }
@@ -209,15 +196,10 @@ export async function generateFromText(textContent) {
   // Strategy 1: Groq (Llama 3.3 70B) — Primary, fastest
   if (process.env.GROQ_API_KEY) {
     try {
-      console.log("[AI] Trying Groq (Llama 3.3 70B)...");
-      const result = await callGroq(textContent);
-      const parsed = JSON.parse(cleanJsonResponse(result));
       if (parsed.cards && parsed.cards.length > 0) {
-        console.log(`[AI] Groq generated ${parsed.cards.length} cards`);
         return { ...parsed, provider: "groq" };
       }
     } catch (err) {
-      console.error("[AI] Groq failed:", err.message);
       errors.push(`Groq: ${err.message}`);
     }
   }
@@ -225,15 +207,10 @@ export async function generateFromText(textContent) {
   // Strategy 2: Gemini 2.5 Flash
   if (process.env.GEMINI_API_KEY) {
     try {
-      console.log("[AI] Trying Gemini 2.5 Flash with text...");
-      const result = await callGeminiWithText(textContent, "gemini-2.5-flash-preview-04-17");
-      const parsed = JSON.parse(cleanJsonResponse(result));
       if (parsed.cards && parsed.cards.length > 0) {
-        console.log(`[AI] Gemini Flash (text) generated ${parsed.cards.length} cards`);
         return { ...parsed, provider: "gemini-flash" };
       }
     } catch (err) {
-      console.error("[AI] Gemini Flash text failed:", err.message);
       errors.push(`Gemini Flash: ${err.message}`);
     }
   }
@@ -241,15 +218,10 @@ export async function generateFromText(textContent) {
   // Strategy 3: OpenAI (GPT-4o)
   if (process.env.OPENAI_API_KEY) {
     try {
-      console.log("[AI] Trying OpenAI (gpt-4o)...");
-      const result = await callOpenAI(textContent);
-      const parsed = JSON.parse(cleanJsonResponse(result));
       if (parsed.cards && parsed.cards.length > 0) {
-        console.log(`[AI] OpenAI generated ${parsed.cards.length} cards`);
         return { ...parsed, provider: "openai" };
       }
     } catch (err) {
-      console.error("[AI] OpenAI text failed:", err.message);
       errors.push(`OpenAI: ${err.message}`);
     }
   }
@@ -277,7 +249,7 @@ export async function regenerateAnswer(question, currentAnswer) {
       });
       return response.choices[0].message.content;
     } catch (err) {
-      console.error("[AI] Groq regenerate failed:", err.message);
+      // Fail silently and let the next block handle it
     }
   }
 
@@ -290,7 +262,7 @@ export async function regenerateAnswer(question, currentAnswer) {
       });
       return response.text;
     } catch (err) {
-      console.error("[AI] Gemini regenerate failed:", err.message);
+      // Fail silently and let the next block handle it
     }
   }
 
@@ -307,7 +279,7 @@ export async function regenerateAnswer(question, currentAnswer) {
       });
       return response.choices[0].message.content;
     } catch (err) {
-      console.error("[AI] OpenAI regenerate failed:", err.message);
+      // Fail silently
     }
   }
 
