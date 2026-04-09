@@ -166,6 +166,8 @@ export async function generateFromPDF(fileBuffer, fileName) {
   // Strategy 1: Gemini 2.5 Flash with native PDF
   if (process.env.GEMINI_API_KEY) {
     try {
+      const raw = await callGeminiWithPDF(fileBuffer, fileName, "gemini-2.5-flash-preview-04-17");
+      const parsed = JSON.parse(cleanJsonResponse(raw));
       if (parsed.cards && parsed.cards.length > 0) {
         return { ...parsed, provider: "gemini-flash" };
       }
@@ -175,6 +177,8 @@ export async function generateFromPDF(fileBuffer, fileName) {
 
     // Strategy 2: Gemini 2.5 Pro for complex content
     try {
+      const raw = await callGeminiWithPDF(fileBuffer, fileName, "gemini-2.5-pro-preview-03-25");
+      const parsed = JSON.parse(cleanJsonResponse(raw));
       if (parsed.cards && parsed.cards.length > 0) {
         return { ...parsed, provider: "gemini-pro" };
       }
@@ -196,6 +200,8 @@ export async function generateFromText(textContent) {
   // Strategy 1: Groq (Llama 3.3 70B) — Primary, fastest
   if (process.env.GROQ_API_KEY) {
     try {
+      const raw = await callGroq(textContent);
+      const parsed = JSON.parse(cleanJsonResponse(raw));
       if (parsed.cards && parsed.cards.length > 0) {
         return { ...parsed, provider: "groq" };
       }
@@ -207,6 +213,8 @@ export async function generateFromText(textContent) {
   // Strategy 2: Gemini 2.5 Flash
   if (process.env.GEMINI_API_KEY) {
     try {
+      const raw = await callGeminiWithText(textContent, "gemini-2.5-flash-preview-04-17");
+      const parsed = JSON.parse(cleanJsonResponse(raw));
       if (parsed.cards && parsed.cards.length > 0) {
         return { ...parsed, provider: "gemini-flash" };
       }
@@ -218,6 +226,8 @@ export async function generateFromText(textContent) {
   // Strategy 3: OpenAI (GPT-4o)
   if (process.env.OPENAI_API_KEY) {
     try {
+      const raw = await callOpenAI(textContent);
+      const parsed = JSON.parse(cleanJsonResponse(raw));
       if (parsed.cards && parsed.cards.length > 0) {
         return { ...parsed, provider: "openai" };
       }
