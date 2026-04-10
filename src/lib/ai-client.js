@@ -1,5 +1,6 @@
 import Groq from "groq-sdk";
 import { GoogleGenAI } from "@google/genai";
+import pdfParse from "pdf-parse";
 
 const FLASHCARD_SYSTEM_PROMPT = `You are an expert educator and flashcard creator. Your job is to analyze educational content and generate high-quality flashcards that maximize learning and retention.
 
@@ -134,6 +135,22 @@ function cleanJsonResponse(text) {
 
 export async function generateFromPDF(fileBuffer, fileName) {
   const errors = [];
+
+  if (process.env.GROQ_API_KEY) {
+    try {
+      const pdfData = await pdfParse(fileBuffer);
+      if (pdfData && pdfData.text && pdfData.text.trim().length > 50) {
+        const raw = await callGroq(pdfData.text);
+        const parsed = JSON.parse(cleanJsonResponse(raw));
+        if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "groq" };
+      } else {
+        errors.push("Groq Llama: Extracted text from PDF was too short or empty.");
+      }
+    } catch (err) {
+      errors.push(`Groq Llama: ${err.message}`);
+    }
+  }
+
   if (process.env.GEMINI_API_KEY) {
     try {
       const raw = await callGeminiWithPDF(fileBuffer, fileName, "gemini-2.5-flash");
@@ -151,6 +168,7 @@ export async function generateFromPDF(fileBuffer, fileName) {
       errors.push(`Gemini Pro: ${err.message}`);
     }
   }
+
   throw new Error(`All AI providers failed for PDF. Errors: ${errors.join("; ")}`);
 }
 
