@@ -1,16 +1,18 @@
 import Groq from "groq-sdk";
 import { GoogleGenAI } from "@google/genai";
 
-// pdf-parse v2 uses named exports — no default export exists
-// We use a dynamic import inside the function to avoid build-time ESM issues
+// ---------------------------------------------------------------------------
+// PDF text extraction
+// `unpdf` is Node/Edge safe — no DOMMatrix or browser APIs required.
+// `pdf-parse` v2 fails on Vercel with "DOMMatrix is not defined".
+// ---------------------------------------------------------------------------
+
 async function parsePdf(buffer) {
-  // Try named export first (pdf-parse v2)
   try {
-    const mod = await import("pdf-parse");
-    const parseFn = mod.pdf ?? mod.default ?? mod;
-    if (typeof parseFn !== "function") throw new Error("pdf-parse: no callable export found");
-    const result = await parseFn(buffer);
-    return result?.text ?? "";
+    const { getDocumentProxy, extractText } = await import("unpdf");
+    const pdf = await getDocumentProxy(new Uint8Array(buffer));
+    const { text } = await extractText(pdf, { mergePages: true });
+    return text ?? "";
   } catch (err) {
     throw new Error(`PDF text extraction failed: ${err.message}`);
   }
@@ -63,14 +65,16 @@ const REGENERATE_SYSTEM_PROMPT = `You are an expert educator. Given a flashcard 
 
 function cleanJsonResponse(text) {
   if (!text) throw new Error("Empty response from AI provider");
-  // Strip markdown code fences if present
-  const stripped = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
-  // Try to parse as-is first
+  // Strip markdown code fences if present (Gemini sometimes wraps output)
+  const stripped = text
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim();
   try {
     JSON.parse(stripped);
     return stripped;
   } catch {
-    // Extract first JSON object
+    // Try to extract the first JSON object from the string
     const match = stripped.match(/\{[\s\S]*\}/);
     if (match) return match[0];
     throw new Error("Could not extract valid JSON from AI response");
@@ -87,7 +91,7 @@ function validateDeck(parsed) {
 }
 
 // ---------------------------------------------------------------------------
-// Provider: Groq (Llama 3.3 70B) — fastest, primary
+// Provider: Groq (Llama 3.3 70B) — always tried first, fastest
 // ---------------------------------------------------------------------------
 
 async function callGroq(textContent) {
@@ -109,10 +113,19 @@ async function callGroq(textContent) {
 }
 
 // ---------------------------------------------------------------------------
-// Provider: Gemini — native PDF vision + text fallback
+// Provider: Gemini
+//
+// Correct model names for the v1beta API (as of 2025):
+//   gemini-2.5-flash  — latest, may be rate-limited under high demand
+//   gemini-1.5-flash  — reliable, fast fallback
+//   gemini-1.5-pro    — highest quality fallback
+//
+// "gemini-pro" (without version) was removed and returns 404.
 // ---------------------------------------------------------------------------
 
-async function callGeminiWithPDF(fileBuffer, fileName, model = "gemini-2.5-flash") {
+const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-pro"];
+
+async function callGeminiWithPDF(fileBuffer, fileName, model) {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
   const uploadedFile = await ai.files.upload({
@@ -126,7 +139,12 @@ async function callGeminiWithPDF(fileBuffer, fileName, model = "gemini-2.5-flash
       {
         role: "user",
         parts: [
-          { fileData: { fileUri: uploadedFile.uri, mimeType: "application/pdf" } },
+          {
+            fileData: {
+              fileUri: uploadedFile.uri,
+              mimeType: "application/pdf",
+            },
+          },
           {
             text: `${FLASHCARD_SYSTEM_PROMPT}\n\nAnalyze this PDF document thoroughly and generate comprehensive flashcards covering all key material. Return ONLY valid JSON.`,
           },
@@ -139,7 +157,7 @@ async function callGeminiWithPDF(fileBuffer, fileName, model = "gemini-2.5-flash
   return response.text;
 }
 
-async function callGeminiWithText(textContent, model = "gemini-2.5-flash") {
+async function callGeminiWithText(textContent, model) {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
   const response = await ai.models.generateContent({
@@ -168,14 +186,15 @@ async function callGeminiWithText(textContent, model = "gemini-2.5-flash") {
  * Generate flashcards from a PDF buffer.
  *
  * Cascade:
- *   1. Groq (Llama 3.3 70B) — extract text with pdf-parse, send to Groq
- *   2. Gemini 2.5 Flash    — native PDF vision (no text extraction needed)
- *   3. Gemini Pro          — fallback
+ *   1. Groq (Llama 3.3 70B) — extract text with unpdf, send to Groq
+ *   2. Gemini 2.5 Flash     — native PDF vision (no text extraction needed)
+ *   3. Gemini 1.5 Flash     — reliable fallback
+ *   4. Gemini 1.5 Pro       — highest quality fallback
  */
 export async function generateFromPDF(fileBuffer, fileName) {
   const errors = [];
 
-  // ── 1. Groq via pdf-parse text extraction ──────────────────────────────
+  // ── 1. Groq via unpdf text extraction ─────────────────────────────────
   if (process.env.GROQ_API_KEY) {
     try {
       const text = await parsePdf(fileBuffer);
@@ -185,37 +204,33 @@ export async function generateFromPDF(fileBuffer, fileName) {
         if (validateDeck(parsed)) return { ...parsed, provider: "groq" };
         errors.push("Groq: Response parsed but contained no cards");
       } else {
-        errors.push("Groq: Extracted PDF text was too short — falling back to Gemini vision");
+        errors.push(
+          "Groq: Extracted PDF text too short — falling back to Gemini native vision",
+        );
       }
     } catch (err) {
       errors.push(`Groq: ${err.message}`);
     }
   }
 
-  // ── 2. Gemini 2.5 Flash (native PDF vision) ────────────────────────────
+  // ── 2-4. Gemini models with native PDF vision ──────────────────────────
   if (process.env.GEMINI_API_KEY) {
-    try {
-      const raw = await callGeminiWithPDF(fileBuffer, fileName, "gemini-2.5-flash");
-      const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (validateDeck(parsed)) return { ...parsed, provider: "gemini-flash" };
-      errors.push("Gemini 2.5 Flash: Response parsed but contained no cards");
-    } catch (err) {
-      errors.push(`Gemini 2.5 Flash: ${err.message}`);
-    }
-
-    // ── 3. Gemini Pro fallback ─────────────────────────────────────────────
-    try {
-      const raw = await callGeminiWithPDF(fileBuffer, fileName, "gemini-pro");
-      const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (validateDeck(parsed)) return { ...parsed, provider: "gemini-pro" };
-      errors.push("Gemini Pro: Response parsed but contained no cards");
-    } catch (err) {
-      errors.push(`Gemini Pro: ${err.message}`);
+    for (const model of GEMINI_MODELS) {
+      try {
+        const raw = await callGeminiWithPDF(fileBuffer, fileName, model);
+        const parsed = JSON.parse(cleanJsonResponse(raw));
+        if (validateDeck(parsed)) return { ...parsed, provider: model };
+        errors.push(`${model}: Response parsed but contained no cards`);
+      } catch (err) {
+        errors.push(`${model}: ${err.message}`);
+      }
     }
   }
 
   throw new Error(
-    `All AI providers failed for PDF generation.\n\nDetails:\n${errors.map((e, i) => `  ${i + 1}. ${e}`).join("\n")}`
+    `All AI providers failed for PDF generation.\n\nDetails:\n${errors
+      .map((e, i) => `  ${i + 1}. ${e}`)
+      .join("\n")}`,
   );
 }
 
@@ -225,7 +240,8 @@ export async function generateFromPDF(fileBuffer, fileName) {
  * Cascade:
  *   1. Groq (Llama 3.3 70B) — fastest
  *   2. Gemini 2.5 Flash
- *   3. Gemini Pro
+ *   3. Gemini 1.5 Flash
+ *   4. Gemini 1.5 Pro
  */
 export async function generateFromText(textContent) {
   const errors = [];
@@ -242,37 +258,30 @@ export async function generateFromText(textContent) {
     }
   }
 
-  // ── 2. Gemini 2.5 Flash ────────────────────────────────────────────────
+  // ── 2-4. Gemini models ─────────────────────────────────────────────────
   if (process.env.GEMINI_API_KEY) {
-    try {
-      const raw = await callGeminiWithText(textContent, "gemini-2.5-flash");
-      const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (validateDeck(parsed)) return { ...parsed, provider: "gemini-flash" };
-      errors.push("Gemini 2.5 Flash: Response parsed but contained no cards");
-    } catch (err) {
-      errors.push(`Gemini 2.5 Flash: ${err.message}`);
-    }
-
-    // ── 3. Gemini Pro ──────────────────────────────────────────────────────
-    try {
-      const raw = await callGeminiWithText(textContent, "gemini-pro");
-      const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (validateDeck(parsed)) return { ...parsed, provider: "gemini-pro" };
-      errors.push("Gemini Pro: Response parsed but contained no cards");
-    } catch (err) {
-      errors.push(`Gemini Pro: ${err.message}`);
+    for (const model of GEMINI_MODELS) {
+      try {
+        const raw = await callGeminiWithText(textContent, model);
+        const parsed = JSON.parse(cleanJsonResponse(raw));
+        if (validateDeck(parsed)) return { ...parsed, provider: model };
+        errors.push(`${model}: Response parsed but contained no cards`);
+      } catch (err) {
+        errors.push(`${model}: ${err.message}`);
+      }
     }
   }
 
   throw new Error(
-    `All AI providers failed for text generation.\n\nDetails:\n${errors.map((e, i) => `  ${i + 1}. ${e}`).join("\n")}`
+    `All AI providers failed for text generation.\n\nDetails:\n${errors
+      .map((e, i) => `  ${i + 1}. ${e}`)
+      .join("\n")}`,
   );
 }
 
 /**
  * Regenerate a single card's answer.
- *
- * Cascade: Groq → Gemini 2.5 Flash → Gemini Pro
+ * Cascade: Groq → Gemini 2.5 Flash → 1.5 Flash → 1.5 Pro
  */
 export async function regenerateAnswer(question, currentAnswer) {
   const prompt = `Current question: "${question}"\nCurrent answer: "${currentAnswer}"\n\nGenerate a better, more detailed answer. Respond with ONLY the improved answer text.`;
@@ -292,46 +301,30 @@ export async function regenerateAnswer(question, currentAnswer) {
       });
       const text = response.choices[0].message.content?.trim();
       if (text) return text;
-    } catch (err) {
-      // fall through
+    } catch {
+      // fall through to Gemini
     }
   }
 
-  // ── 2. Gemini 2.5 Flash ────────────────────────────────────────────────
+  // ── 2-4. Gemini models ─────────────────────────────────────────────────
   if (process.env.GEMINI_API_KEY) {
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: `${REGENERATE_SYSTEM_PROMPT}\n\n${prompt}` }],
-          },
-        ],
-      });
-      const text = response.text?.trim();
-      if (text) return text;
-    } catch (err) {
-      // fall through
-    }
-
-    // ── 3. Gemini Pro ──────────────────────────────────────────────────────
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const response = await ai.models.generateContent({
-        model: "gemini-pro",
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: `${REGENERATE_SYSTEM_PROMPT}\n\n${prompt}` }],
-          },
-        ],
-      });
-      const text = response.text?.trim();
-      if (text) return text;
-    } catch (err) {
-      // fall through
+    for (const model of GEMINI_MODELS) {
+      try {
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const response = await ai.models.generateContent({
+          model,
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: `${REGENERATE_SYSTEM_PROMPT}\n\n${prompt}` }],
+            },
+          ],
+        });
+        const text = response.text?.trim();
+        if (text) return text;
+      } catch {
+        // fall through
+      }
     }
   }
 
