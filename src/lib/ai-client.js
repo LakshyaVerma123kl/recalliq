@@ -4,7 +4,6 @@ import { GoogleGenAI } from "@google/genai";
 // ---------------------------------------------------------------------------
 // PDF text extraction
 // `unpdf` is Node/Edge safe — no DOMMatrix or browser APIs required.
-// `pdf-parse` v2 fails on Vercel with "DOMMatrix is not defined".
 // ---------------------------------------------------------------------------
 
 async function parsePdf(buffer) {
@@ -60,12 +59,26 @@ Generate 15-30 comprehensive, high-quality flashcards. Quality over quantity.`;
 const REGENERATE_SYSTEM_PROMPT = `You are an expert educator. Given a flashcard question, generate a better, more detailed answer. Keep it concise but thorough. Respond with ONLY the improved answer text, nothing else.`;
 
 // ---------------------------------------------------------------------------
+// Gemini model cascade — tried in order after Groq fails
+// Most capable / latest first, then progressively older fallbacks
+// ---------------------------------------------------------------------------
+
+const GEMINI_MODELS = [
+  "gemini-2.5-pro", // most capable, may be slow/rate-limited
+  "gemini-2.5-flash", // fast, latest flash
+  "gemini-2.5-flash-lite", // lighter version of 2.5 flash
+  "gemini-2.0-flash", // stable 2.0 flash
+  "gemini-1.5-pro", // reliable high-quality fallback
+  "gemini-1.5-flash", // reliable fast fallback
+];
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 function cleanJsonResponse(text) {
   if (!text) throw new Error("Empty response from AI provider");
-  // Strip markdown code fences if present (Gemini sometimes wraps output)
+  // Strip markdown code fences (Gemini sometimes wraps output)
   const stripped = text
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```\s*$/i, "")
@@ -74,7 +87,6 @@ function cleanJsonResponse(text) {
     JSON.parse(stripped);
     return stripped;
   } catch {
-    // Try to extract the first JSON object from the string
     const match = stripped.match(/\{[\s\S]*\}/);
     if (match) return match[0];
     throw new Error("Could not extract valid JSON from AI response");
@@ -114,16 +126,7 @@ async function callGroq(textContent) {
 
 // ---------------------------------------------------------------------------
 // Provider: Gemini
-//
-// Correct model names for the v1beta API (as of 2025):
-//   gemini-2.5-flash  — latest, may be rate-limited under high demand
-//   gemini-1.5-flash  — reliable, fast fallback
-//   gemini-1.5-pro    — highest quality fallback
-//
-// "gemini-pro" (without version) was removed and returns 404.
 // ---------------------------------------------------------------------------
-
-const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-pro"];
 
 async function callGeminiWithPDF(fileBuffer, fileName, model) {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
@@ -187,9 +190,12 @@ async function callGeminiWithText(textContent, model) {
  *
  * Cascade:
  *   1. Groq (Llama 3.3 70B) — extract text with unpdf, send to Groq
- *   2. Gemini 2.5 Flash     — native PDF vision (no text extraction needed)
- *   3. Gemini 1.5 Flash     — reliable fallback
- *   4. Gemini 1.5 Pro       — highest quality fallback
+ *   2. Gemini 2.5 Pro
+ *   3. Gemini 2.5 Flash
+ *   4. Gemini 2.5 Flash Lite
+ *   5. Gemini 2.0 Flash
+ *   6. Gemini 1.5 Pro
+ *   7. Gemini 1.5 Flash
  */
 export async function generateFromPDF(fileBuffer, fileName) {
   const errors = [];
@@ -213,7 +219,7 @@ export async function generateFromPDF(fileBuffer, fileName) {
     }
   }
 
-  // ── 2-4. Gemini models with native PDF vision ──────────────────────────
+  // ── 2-7. Gemini models with native PDF vision ──────────────────────────
   if (process.env.GEMINI_API_KEY) {
     for (const model of GEMINI_MODELS) {
       try {
@@ -238,10 +244,13 @@ export async function generateFromPDF(fileBuffer, fileName) {
  * Generate flashcards from plain text.
  *
  * Cascade:
- *   1. Groq (Llama 3.3 70B) — fastest
- *   2. Gemini 2.5 Flash
- *   3. Gemini 1.5 Flash
- *   4. Gemini 1.5 Pro
+ *   1. Groq (Llama 3.3 70B)
+ *   2. Gemini 2.5 Pro
+ *   3. Gemini 2.5 Flash
+ *   4. Gemini 2.5 Flash Lite
+ *   5. Gemini 2.0 Flash
+ *   6. Gemini 1.5 Pro
+ *   7. Gemini 1.5 Flash
  */
 export async function generateFromText(textContent) {
   const errors = [];
@@ -258,7 +267,7 @@ export async function generateFromText(textContent) {
     }
   }
 
-  // ── 2-4. Gemini models ─────────────────────────────────────────────────
+  // ── 2-7. Gemini models ─────────────────────────────────────────────────
   if (process.env.GEMINI_API_KEY) {
     for (const model of GEMINI_MODELS) {
       try {
@@ -281,7 +290,15 @@ export async function generateFromText(textContent) {
 
 /**
  * Regenerate a single card's answer.
- * Cascade: Groq → Gemini 2.5 Flash → 1.5 Flash → 1.5 Pro
+ *
+ * Cascade:
+ *   1. Groq
+ *   2. Gemini 2.5 Pro
+ *   3. Gemini 2.5 Flash
+ *   4. Gemini 2.5 Flash Lite
+ *   5. Gemini 2.0 Flash
+ *   6. Gemini 1.5 Pro
+ *   7. Gemini 1.5 Flash
  */
 export async function regenerateAnswer(question, currentAnswer) {
   const prompt = `Current question: "${question}"\nCurrent answer: "${currentAnswer}"\n\nGenerate a better, more detailed answer. Respond with ONLY the improved answer text.`;
@@ -302,11 +319,11 @@ export async function regenerateAnswer(question, currentAnswer) {
       const text = response.choices[0].message.content?.trim();
       if (text) return text;
     } catch {
-      // fall through to Gemini
+      // fall through
     }
   }
 
-  // ── 2-4. Gemini models ─────────────────────────────────────────────────
+  // ── 2-7. Gemini models ─────────────────────────────────────────────────
   if (process.env.GEMINI_API_KEY) {
     for (const model of GEMINI_MODELS) {
       try {
