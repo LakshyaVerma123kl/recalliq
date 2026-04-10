@@ -1,6 +1,6 @@
 import Groq from "groq-sdk";
 import { GoogleGenAI } from "@google/genai";
-import pdfParse from "pdf-parse";
+import { pdf as pdfParse } from "pdf-parse";
 
 const FLASHCARD_SYSTEM_PROMPT = `You are an expert educator and flashcard creator. Your job is to analyze educational content and generate high-quality flashcards that maximize learning and retention.
 
