@@ -1,6 +1,24 @@
 import Groq from "groq-sdk";
 import { GoogleGenAI } from "@google/genai";
-import { pdf as pdfParse } from "pdf-parse";
+
+// pdf-parse v2 uses named exports — no default export exists
+// We use a dynamic import inside the function to avoid build-time ESM issues
+async function parsePdf(buffer) {
+  // Try named export first (pdf-parse v2)
+  try {
+    const mod = await import("pdf-parse");
+    const parseFn = mod.pdf ?? mod.default ?? mod;
+    if (typeof parseFn !== "function") throw new Error("pdf-parse: no callable export found");
+    const result = await parseFn(buffer);
+    return result?.text ?? "";
+  } catch (err) {
+    throw new Error(`PDF text extraction failed: ${err.message}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Prompts
+// ---------------------------------------------------------------------------
 
 const FLASHCARD_SYSTEM_PROMPT = `You are an expert educator and flashcard creator. Your job is to analyze educational content and generate high-quality flashcards that maximize learning and retention.
 
@@ -39,7 +57,40 @@ Generate 15-30 comprehensive, high-quality flashcards. Quality over quantity.`;
 
 const REGENERATE_SYSTEM_PROMPT = `You are an expert educator. Given a flashcard question, generate a better, more detailed answer. Keep it concise but thorough. Respond with ONLY the improved answer text, nothing else.`;
 
-async function callGroq(textContent, customPrompt) {
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function cleanJsonResponse(text) {
+  if (!text) throw new Error("Empty response from AI provider");
+  // Strip markdown code fences if present
+  const stripped = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+  // Try to parse as-is first
+  try {
+    JSON.parse(stripped);
+    return stripped;
+  } catch {
+    // Extract first JSON object
+    const match = stripped.match(/\{[\s\S]*\}/);
+    if (match) return match[0];
+    throw new Error("Could not extract valid JSON from AI response");
+  }
+}
+
+function validateDeck(parsed) {
+  return (
+    parsed &&
+    typeof parsed === "object" &&
+    Array.isArray(parsed.cards) &&
+    parsed.cards.length > 0
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Provider: Groq (Llama 3.3 70B) — fastest, primary
+// ---------------------------------------------------------------------------
+
+async function callGroq(textContent) {
   const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   const response = await groq.chat.completions.create({
     model: "llama-3.3-70b-versatile",
@@ -47,7 +98,7 @@ async function callGroq(textContent, customPrompt) {
       { role: "system", content: FLASHCARD_SYSTEM_PROMPT },
       {
         role: "user",
-        content: customPrompt ? customPrompt : `Analyze the following educational content and generate comprehensive flashcards:\n\n${textContent}`,
+        content: `Analyze the following educational content and generate comprehensive flashcards:\n\n${textContent}`,
       },
     ],
     temperature: 0.7,
@@ -57,212 +108,232 @@ async function callGroq(textContent, customPrompt) {
   return response.choices[0].message.content;
 }
 
-async function callHuggingFace(textContent, customPrompt) {
-  const response = await fetch("https://api-inference.huggingface.co/models/meta-llama/Llama-3.3-70B-Instruct/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "meta-llama/Llama-3.3-70B-Instruct",
-      messages: [
-        { role: "system", content: FLASHCARD_SYSTEM_PROMPT },
-        {
-          role: "user",
-          content: customPrompt ? customPrompt : `Analyze the following educational content and generate comprehensive flashcards:\n\n${textContent}`,
-        }
-      ],
-      max_tokens: 8000,
-      temperature: 0.7,
-      response_format: { type: "json_object" }
-    })
-  });
-  const data = await response.json();
-  if(!response.ok) throw new Error(data.error?.message || "HuggingFace API failed");
-  return data.choices[0].message.content;
-}
+// ---------------------------------------------------------------------------
+// Provider: Gemini — native PDF vision + text fallback
+// ---------------------------------------------------------------------------
 
-async function callGeminiWithPDF(fileBuffer, fileName, model) {
+async function callGeminiWithPDF(fileBuffer, fileName, model = "gemini-2.5-flash") {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
   const uploadedFile = await ai.files.upload({
     file: new Blob([fileBuffer], { type: "application/pdf" }),
     config: { displayName: fileName },
   });
+
   const response = await ai.models.generateContent({
-    model: model,
+    model,
     contents: [
       {
         role: "user",
         parts: [
           { fileData: { fileUri: uploadedFile.uri, mimeType: "application/pdf" } },
-          { text: `${FLASHCARD_SYSTEM_PROMPT}\n\nAnalyze this PDF document thoroughly and generate comprehensive flashcards covering all key material. Return ONLY valid JSON.` },
+          {
+            text: `${FLASHCARD_SYSTEM_PROMPT}\n\nAnalyze this PDF document thoroughly and generate comprehensive flashcards covering all key material. Return ONLY valid JSON.`,
+          },
         ],
       },
     ],
     config: { temperature: 0.7, maxOutputTokens: 8192 },
   });
+
   return response.text;
 }
 
-async function callGeminiWithText(textContent, model) {
+async function callGeminiWithText(textContent, model = "gemini-2.5-flash") {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
   const response = await ai.models.generateContent({
-    model: model,
+    model,
     contents: [
       {
         role: "user",
         parts: [
-          { text: `${FLASHCARD_SYSTEM_PROMPT}\n\nAnalyze the following educational content and generate comprehensive flashcards:\n\n${textContent}` },
+          {
+            text: `${FLASHCARD_SYSTEM_PROMPT}\n\nAnalyze the following educational content and generate comprehensive flashcards:\n\n${textContent}`,
+          },
         ],
       },
     ],
     config: { temperature: 0.7, maxOutputTokens: 8192 },
   });
+
   return response.text;
 }
 
-function cleanJsonResponse(text) {
-  try {
-    JSON.parse(text);
-    return text.trim();
-  } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (match) return match[0];
-    return text.trim();
-  }
-}
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
+/**
+ * Generate flashcards from a PDF buffer.
+ *
+ * Cascade:
+ *   1. Groq (Llama 3.3 70B) — extract text with pdf-parse, send to Groq
+ *   2. Gemini 2.5 Flash    — native PDF vision (no text extraction needed)
+ *   3. Gemini Pro          — fallback
+ */
 export async function generateFromPDF(fileBuffer, fileName) {
   const errors = [];
 
+  // ── 1. Groq via pdf-parse text extraction ──────────────────────────────
   if (process.env.GROQ_API_KEY) {
     try {
-      const pdfData = await pdfParse(fileBuffer);
-      if (pdfData && pdfData.text && pdfData.text.trim().length > 50) {
-        const raw = await callGroq(pdfData.text);
+      const text = await parsePdf(fileBuffer);
+      if (text && text.trim().length >= 50) {
+        const raw = await callGroq(text.trim());
         const parsed = JSON.parse(cleanJsonResponse(raw));
-        if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "groq" };
+        if (validateDeck(parsed)) return { ...parsed, provider: "groq" };
+        errors.push("Groq: Response parsed but contained no cards");
       } else {
-        errors.push("Groq Llama: Extracted text from PDF was too short or empty.");
+        errors.push("Groq: Extracted PDF text was too short — falling back to Gemini vision");
       }
     } catch (err) {
-      errors.push(`Groq Llama: ${err.message}`);
+      errors.push(`Groq: ${err.message}`);
     }
   }
 
+  // ── 2. Gemini 2.5 Flash (native PDF vision) ────────────────────────────
   if (process.env.GEMINI_API_KEY) {
     try {
       const raw = await callGeminiWithPDF(fileBuffer, fileName, "gemini-2.5-flash");
       const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "gemini" };
+      if (validateDeck(parsed)) return { ...parsed, provider: "gemini-flash" };
+      errors.push("Gemini 2.5 Flash: Response parsed but contained no cards");
     } catch (err) {
       errors.push(`Gemini 2.5 Flash: ${err.message}`);
     }
-    
+
+    // ── 3. Gemini Pro fallback ─────────────────────────────────────────────
     try {
       const raw = await callGeminiWithPDF(fileBuffer, fileName, "gemini-pro");
       const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "gemini" };
+      if (validateDeck(parsed)) return { ...parsed, provider: "gemini-pro" };
+      errors.push("Gemini Pro: Response parsed but contained no cards");
     } catch (err) {
       errors.push(`Gemini Pro: ${err.message}`);
     }
   }
 
-  throw new Error(`All AI providers failed for PDF. Errors: ${errors.join("; ")}`);
+  throw new Error(
+    `All AI providers failed for PDF generation.\n\nDetails:\n${errors.map((e, i) => `  ${i + 1}. ${e}`).join("\n")}`
+  );
 }
 
+/**
+ * Generate flashcards from plain text.
+ *
+ * Cascade:
+ *   1. Groq (Llama 3.3 70B) — fastest
+ *   2. Gemini 2.5 Flash
+ *   3. Gemini Pro
+ */
 export async function generateFromText(textContent) {
   const errors = [];
 
-  // 1. Groq (Llama 3.3 70B)
+  // ── 1. Groq ────────────────────────────────────────────────────────────
   if (process.env.GROQ_API_KEY) {
     try {
       const raw = await callGroq(textContent);
       const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "groq" };
+      if (validateDeck(parsed)) return { ...parsed, provider: "groq" };
+      errors.push("Groq: Response parsed but contained no cards");
     } catch (err) {
-      errors.push(`Groq Llama 3.3 70B: ${err.message}`);
+      errors.push(`Groq: ${err.message}`);
     }
   }
 
-  // 2. Gemini 2.5 Flash
+  // ── 2. Gemini 2.5 Flash ────────────────────────────────────────────────
   if (process.env.GEMINI_API_KEY) {
     try {
       const raw = await callGeminiWithText(textContent, "gemini-2.5-flash");
       const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "gemini" };
+      if (validateDeck(parsed)) return { ...parsed, provider: "gemini-flash" };
+      errors.push("Gemini 2.5 Flash: Response parsed but contained no cards");
     } catch (err) {
       errors.push(`Gemini 2.5 Flash: ${err.message}`);
     }
-  }
 
-  // 3. Gemini Pro
-  if (process.env.GEMINI_API_KEY) {
+    // ── 3. Gemini Pro ──────────────────────────────────────────────────────
     try {
       const raw = await callGeminiWithText(textContent, "gemini-pro");
       const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "gemini" };
+      if (validateDeck(parsed)) return { ...parsed, provider: "gemini-pro" };
+      errors.push("Gemini Pro: Response parsed but contained no cards");
     } catch (err) {
       errors.push(`Gemini Pro: ${err.message}`);
     }
   }
 
-  // 4. HuggingFace Llama 3.3
-  if (process.env.HUGGINGFACE_API_KEY) {
-    try {
-      const raw = await callHuggingFace(textContent);
-      const parsed = JSON.parse(cleanJsonResponse(raw));
-      if (parsed.cards && parsed.cards.length > 0) return { ...parsed, provider: "huggingface" };
-    } catch (err) {
-      errors.push(`HuggingFace Llama 3.3: ${err.message}`);
-    }
-  }
-
-  throw new Error(`All AI providers failed. Errors: ${errors.join("; ")}`);
+  throw new Error(
+    `All AI providers failed for text generation.\n\nDetails:\n${errors.map((e, i) => `  ${i + 1}. ${e}`).join("\n")}`
+  );
 }
 
+/**
+ * Regenerate a single card's answer.
+ *
+ * Cascade: Groq → Gemini 2.5 Flash → Gemini Pro
+ */
 export async function regenerateAnswer(question, currentAnswer) {
   const prompt = `Current question: "${question}"\nCurrent answer: "${currentAnswer}"\n\nGenerate a better, more detailed answer. Respond with ONLY the improved answer text.`;
 
+  // ── 1. Groq ────────────────────────────────────────────────────────────
   if (process.env.GROQ_API_KEY) {
     try {
       const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
       const response = await groq.chat.completions.create({
         model: "llama-3.3-70b-versatile",
-        messages: [{ role: "system", content: REGENERATE_SYSTEM_PROMPT }, { role: "user", content: prompt }],
-        temperature: 0.7, max_tokens: 1000,
+        messages: [
+          { role: "system", content: REGENERATE_SYSTEM_PROMPT },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0.7,
+        max_tokens: 1000,
       });
-      return response.choices[0].message.content;
-    } catch (err) {}
+      const text = response.choices[0].message.content?.trim();
+      if (text) return text;
+    } catch (err) {
+      // fall through
+    }
   }
 
+  // ── 2. Gemini 2.5 Flash ────────────────────────────────────────────────
   if (process.env.GEMINI_API_KEY) {
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
-        contents: [{ role: "user", parts: [{ text: `${REGENERATE_SYSTEM_PROMPT}\n\n${prompt}` }] }],
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: `${REGENERATE_SYSTEM_PROMPT}\n\n${prompt}` }],
+          },
+        ],
       });
-      return response.text;
-    } catch (err) {}
-  }
+      const text = response.text?.trim();
+      if (text) return text;
+    } catch (err) {
+      // fall through
+    }
 
-  if (process.env.HUGGINGFACE_API_KEY) {
+    // ── 3. Gemini Pro ──────────────────────────────────────────────────────
     try {
-      const response = await fetch("https://api-inference.huggingface.co/models/meta-llama/Llama-3.3-70B-Instruct/v1/chat/completions", {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${process.env.HUGGINGFACE_API_KEY}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "meta-llama/Llama-3.3-70B-Instruct",
-          messages: [{ role: "system", content: REGENERATE_SYSTEM_PROMPT }, { role: "user", content: prompt }],
-          temperature: 0.7
-        })
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const response = await ai.models.generateContent({
+        model: "gemini-pro",
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: `${REGENERATE_SYSTEM_PROMPT}\n\n${prompt}` }],
+          },
+        ],
       });
-      const data = await response.json();
-      return data.choices[0].message.content;
-    } catch (err) {}
+      const text = response.text?.trim();
+      if (text) return text;
+    } catch (err) {
+      // fall through
+    }
   }
 
-  throw new Error("No AI provider available for regeneration");
+  throw new Error("No AI provider available for answer regeneration");
 }
